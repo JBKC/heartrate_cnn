@@ -578,8 +578,3 @@ print(f'MAE:  {mae}')
 
 plot_results(session_name, actual_bpm, estimated_bpm, model)
 
-
-Host *.github.com
-  AddKeysToAgent yes
-  UseKeychain yes
-  IdentityFile ~/.ssh/id_ed25519
