@@ -1,3 +1,6 @@
+// Arduino code for extracting PPG and accelerometer sensor readings
+// Used as input to "cnn_realtime_inference_continuous"
+
 #include <Wire.h>
 #include <Adafruit_MMA8451.h>
 #include <Adafruit_Sensor.h>
