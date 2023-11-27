@@ -87,7 +87,7 @@ def preprocess_data_wrist_ppg(session_name):
     y_data = df['y']
     z_data = df['z']
 
-    with open(session_name +'.pkl', 'rb') as file:                    # adjust file path as necessary
+    with open(f'{session_name}.pkl', 'rb') as file:                    # adjust file path as necessary
         ecg_ground_truth = pickle.load(file, encoding='latin1')
 
     # sampling rates given by research paper
