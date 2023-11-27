@@ -1,6 +1,7 @@
 
 '''
-File for running real-time inference of continuous sensor readout, on a pre-trained model
+Run real-time HeartRate inference on a pre-trained model
+Retrieve data via Arduino sketch file "Heartrate_accelerometer_realtime.ino"
 '''
 
 import serial
@@ -10,35 +11,37 @@ import matplotlib, matplotlib.pyplot as plt
 from scipy.signal import butter, lfilter
 from scipy import signal as sg
 
-# initialise
-window_time = 8000 # ms
-segment_data = {}  # Dictionary to store data for each segment
-model_name = 'HR_model_21_a'
-model = load_model('/Users/jamborghini/Documents/PYTHON/Trained Models/' + model_name + '.h5')
-
-# collect realtime data
-ser = serial.Serial('/dev/tty.usbmodem14101', baudrate=115200)
+# initialisation
+window_time = 8 #seconds                  # total segment for calculating heartrate
+segment_data = {}                         # dictionary to store data for each segment
 ppg_data = []
 x_data =[]
 y_data = []
 z_data = []
+model = load_model('HR_model_21_a.h5')    # adjust pathname as necessary
+
+# collect realtime data from Arduino
+ser = serial.Serial('/dev/tty.usbmodem14101', baudrate=115200)        # change input port as necessary
 
 def process_segment(segment_data, indices_ppg, indices_acc):
-
     '''
     Main function for processing data once extracted
     '''
 
-    fs_ppg_buffered = len(segment_data['PPG']['ppg_data']) / (window_time*2 /1000)
-    fs_acc_buffered = len(segment_data['ACCEL']['x_data']) / (window_time*2 /1000)
+    # Calculate sampling frequency for butterworth filter
+    fs_ppg_buffered = len(segment_data['PPG']['ppg_data']) / (window_time*2)
+    fs_acc_buffered = len(segment_data['ACCEL']['x_data']) / (window_time*2)
 
     def band_pass_filter(data, fs):
-
         '''
-        Filter the signal as this is similar to what the CNN has been trained on
+        Filter the input signal to reduce noise and more closely emulate data that model was trained on
         '''
 
         def butter_bandpass(lowcut, highcut, fs, order=5):
+            '''
+            Calculate butterworth coefficients
+            '''
+            
             nyquist = 0.5 * fs
             low = lowcut / nyquist
             high = highcut / nyquist
@@ -46,79 +49,77 @@ def process_segment(segment_data, indices_ppg, indices_acc):
             return b, a
 
         def butter_bandpass_filter(data, lowcut, highcut, fs, order=5):
+            '''
+            Apply butterworth to data
+            '''
+            
             b, a = butter_bandpass(lowcut, highcut, fs, order=order)
             y = lfilter(b, a, data)
             return y
 
-        # PLAY AROUND WITH THIS to find optimum (essentially to match PPG Dalia)
         lowcut = 0.5  # Lower cutoff frequency (Hz)
         highcut = 20  # Upper cutoff frequency (Hz)
-        # Apply the bandpass filter
         result = butter_bandpass_filter(data, lowcut, highcut, fs)
 
         return result
 
+    # filter all signals in real time
     ppg_data = band_pass_filter(segment_data['PPG']['ppg_data'], fs_ppg_buffered)
     x_data = band_pass_filter(segment_data['ACCEL']['x_data'], fs_acc_buffered)
     y_data = band_pass_filter(segment_data['ACCEL']['y_data'], fs_acc_buffered)
     z_data = band_pass_filter(segment_data['ACCEL']['z_data'], fs_acc_buffered)
 
-    # remove the first half (first 8 seconds) to get the cleaned signal with no edge effects
-    buffer_ppg = len([x for x in segment_data['PPG']['ppg_data'] if x <= window_time])
-    buffer_acc = len([x for x in segment_data['ACCEL']['x_data'] if x <= window_time])
+    # trim the first half (first 4 segments) to remove butterworth edge effects
     ppg_data = ppg_data[indices_ppg[3]:]
     x_data = x_data[indices_acc[3]:]
     y_data = y_data[indices_acc[3]:]
     z_data = z_data[indices_acc[3]:]
 
-    # plt.plot(ppg_data, 'black')
-    # plt.show()
-
     def process_for_cnn(ppg_data, x_data, y_data, z_data):
-
         '''
-        Standard process for CNN - finding FFT etc.
+        Processing of data to be passed into CNN
         '''
 
         def calculate_fft(data):
-            result = np.fft.fft(data)  # take full FFT not just the positive part
+            '''
+            Return the FFT (frequency components) of input signal
+            '''
+            
+            result = np.fft.fft(data)  
             return result
-
+    
         def trim_fft(data):
-            # only keep 0-4Hz
-            trim_index = 256 + 1
+            '''
+            Trim frequency data to the range of interest to spot heartbeats (0-4Hz)
+            '''
+            
+            trim_index = 256 +1         
             result = data[:trim_index]
-            return result
+            return result        
 
-        # get the original signal into segments + take FFT
         def segment_fft(data):
-
-            # zero padding to original signal increased frequency resolution before FFT, based on wanting 0-4Hz
+            '''
+            Cut time-domain signal into segments and run processing
+            '''
+            # Zero-pad signal to increase frequency resolution
             desired_freq = 4
-            zeros_to_add = int(256*len(data) /(8*desired_freq) - len(data))   # 8 is scaling factor if we want 256 points
-            # print(f'Zeros to add:  {zeros_to_add}')     # check it matches Excel calculations
-
+            zeros_to_add = int(256*len(data) /(8*desired_freq) - len(data))   # 8 is scaling factor to get 256 points
             num_zeros = np.zeros(zeros_to_add)
             padded = np.concatenate((data, num_zeros))
             segment_fft = calculate_fft(padded)
 
-            # cut down to 0-4Hz
             segment_fft = trim_fft(segment_fft)
-            #print(f'FFT shape:  {segment_fft.shape}')
 
-            # z-normalization individually on each new trimmed segment (makes sense)
+            # Z-normalization
             mean = np.mean(segment_fft)
             std_dev = np.std(segment_fft)
             segment_normalised = (segment_fft - mean) / std_dev
 
             result = np.array(segment_normalised)
-            # plt.plot(result)
-            # plt.show()
-
-            #print(f'Normalised shape:  {result.shape}')
 
             return result
-
+            
+        # Retrieve inputs for model
         ppg_input = segment_fft(ppg_data)
         x_input = segment_fft(x_data)
         y_input = segment_fft(y_data)
@@ -133,17 +134,19 @@ def process_segment(segment_data, indices_ppg, indices_acc):
         return input_all_channels
 
     result = process_for_cnn(ppg_data, x_data, y_data, z_data)
-    print(f'All channels shape:  {result.shape}')
 
     return result
 
-########### Running code section
+'''
+Running real-time inference
+'''
 
-while True:   # to make code run indefinitely
-    data = ser.readline().decode().strip()  # Modify based on your data reading format
-    # print(data)
+while True:
+    # read data sent from Arduino
+    data = ser.readline().decode().strip() 
     parts = data.split(',')
 
+    # split readings based on text stamps
     if parts[0] == 'TIME':
         timestamp = int(parts[1])
         print(timestamp)
@@ -155,11 +158,10 @@ while True:   # to make code run indefinitely
         z = float(parts[3])
         segment_num = int(parts[4])
 
-        # initialise dictionary if this is the first in the segment
+        # initialise dictionary at the start of each segment to store new data
         if segment_num not in segment_data:
             segment_data[segment_num] = {'ACCEL': {'x_data': [], 'y_data': [], 'z_data': []},
                                          'PPG': {'ppg_data': []}}
-
         # append data to this segment's dictionary
         segment_data[segment_num]['ACCEL']['x_data'].append(x)
         segment_data[segment_num]['ACCEL']['y_data'].append(y)
@@ -170,17 +172,17 @@ while True:   # to make code run indefinitely
         ppg = float(parts[1])
         segment_num = int(parts[2])
 
+        # repeat segment setup steps
         if segment_num not in segment_data:
             segment_data[segment_num] = {'ACCEL': {'x_data': [], 'y_data': [], 'z_data': []},
                                          'PPG': {'ppg_data': []}}
-
         segment_data[segment_num]['PPG']['ppg_data'].append(ppg)
 
     elif parts[0] == 'SEGMENT':
-        # find the end of the segment label as coded in Arduino
+        # find the end of the segment label
         segment_num = int(parts[1])
 
-        # super_segment for combining 2 second sub-segments
+        # combine multiple 2 second sub-segements for running inference
         super_segment = {
             'ACCEL': {'x_data': [],'y_data': [],'z_data': []},
             'PPG': {'ppg_data': []}}
@@ -188,12 +190,11 @@ while True:   # to make code run indefinitely
         indices_acc = []
         indices_ppg = []
 
-        if segment_num < 8:  # first 8 segments (0-7) totalling 16 seconds
-            # keep appending onto the end
+        if segment_num < 8:  # append segments until first 8 segments (16 seconds) reached
             pass
 
         else:
-            for i in range(1,9): # taking previous 8 segments whenever a new segment is complete (rolling 8 second window, shifted by 2 seconds)
+            for i in range(1,9): # take previous 8 segments whenever a new segment is complete (rolling 8 second window, shifted by 2 seconds each time)
                 segment = segment_data[segment_num - i]
 
                 super_segment['ACCEL']['x_data'] += segment['ACCEL']['x_data']
