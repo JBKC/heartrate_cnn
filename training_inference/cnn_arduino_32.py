@@ -1,32 +1,24 @@
 
 '''
-Streamlined model that takes up < 40KB
+HeartRate estimator taking in pre-recorded PPG and accelerometer sensor readings
+Outputs CNN model that takes up < 40KB
 Two steps: (1) train model; (2) compress model
 '''
 
 import pickle
-import pprint
 import numpy as np
 import pandas as pd
-import random
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers, models
-from tensorflow.keras.layers import Conv2D, Conv1D, Dense
-from tensorflow.keras.models import Sequential
-from sklearn.model_selection import LeaveOneOut
 from sklearn.metrics import mean_absolute_error
-from sklearn.utils import shuffle
-import matplotlib
 import matplotlib.pyplot as plt
 import wfdb
-from scipy.signal import butter, lfilter, get_window
-from scipy import signal as sg
-import subprocess
-import csv
-import os
-import tensorflow_model_optimization as tfmot
 import time
+
+'''
+Start of preprocessing section
+'''
 
 def preprocess_data_dalia(session_name):
     '''
@@ -207,61 +199,36 @@ def process_for_cnn(ppg_data, x_data, y_data, z_data, ecg_ground_truth, fs_ppg, 
 
     return input_all_channels, label_ecg_data
 
-
-#### start of model training section. ####
-'''
-
-def compute_regression_metrics(model, test_data, label_ecg_data):
-    # GOAL OF FUNCTION = compare test data to labelling to get mean absolute error
-    predictions = CNN_model.predict(test_data)
-    mae = mean_absolute_error(label_ecg_data, predictions)
-    return predictions, mae
-
-
-
 def CNN_model():
-    # This is the model architecture itself (simpler / downsized model as designed for an embedded system)
+    '''
+    Architecture of CNN
+    '''
 
     input_shape = (257,4)
-    # (should set 257 (NFFT) to be dynamic)
-    print("Input shape:", input_shape)
-
     model = models.Sequential()
 
-    # 1. initialise model
-
-    # Convolution Layer
+    # Initial Convolutional Layer
     model.add(layers.Conv1D(filters=8, kernel_size=(1), strides=(1), activation='relu', input_shape=input_shape))
     # Max-Pooling Layer
     model.add(layers.MaxPooling1D(pool_size=(2), strides=(2)))
 
-    # 2. repeat the pattern
-    NL = 3   # number of repetitions
-
+    # Repeating Pattern
+    NL = 3 
     for i in range(1, NL+1):
-        # Convolutional Layer
-        n_filters = 2 ** (i + 3)        #this function doubles the number of filters with each layer (pick out more features)
+        
+        n_filters = 2 ** (i + 3)
         model.add(layers.Conv1D(filters=n_filters, kernel_size=(3), strides=(1), activation='relu'))
-
-        # Max-Pooling Layer
         model.add(layers.MaxPooling1D(pool_size=(2), strides=(2)))
-
-    # 3. final layers
 
     #Final Convolutional Layer
     model.add(layers.Conv1D(filters=16, kernel_size=(1), strides=(1), activation='relu'))
 
-    # Flattening Layer
+    # Flattening layer
     model.add(layers.Flatten())
 
-    # fully connected layers are essential for 'labelling' the data - i.e. learning to associate features with a particular category
     # Fully Connected Layer 1
     n1f_c = 64  # number of neurons
     model.add(layers.Dense(n1f_c, activation='relu'))
-
-    # Add Dropout Layer after the first fully connected layer (more useful when there's lots of layers)
-    # dropout_rate = 0.5  # You can adjust the dropout rate as needed
-    # model.add(layers.Dropout(rate=dropout_rate))
 
     # Fully Connected Layer 2
     n2f_c = 1
@@ -271,86 +238,55 @@ def CNN_model():
     learning_rate = 0.001
     optimizer = keras.optimizers.Adam(learning_rate=learning_rate)
     model.compile(optimizer=optimizer, loss='mean_squared_error')
-    # adam is stochastic gradient descent
 
     model.summary()
 
     return model
 
-#### TRAINING THE MODEL ####
-
-# set up tracker for training + validation accuracy
-class AccuracyHistory(keras.callbacks.Callback):
-    def on_train_begin(self, logs={}):
-        self.train_acc = []
-        self.val_acc = []
-
-    def on_epoch_end(self, batch, logs={}):
-        self.train_acc.append(logs.get('accuracy'))
-        self.val_acc.append(logs.get('val_accuracy'))
+'''
+Start of model training section
+'''
 
 # Model initialisation
-num_epochs = 10  # number of times the dataset is passed through the model (forward + backwards passes) - tweak as necessary (higher = better)
-batch_size = 32  # number of examples processed per backwards and forwards pass
+num_epochs = 10 
+batch_size = 32  
 losses = []
-val_losses = []
 mae_scores = []
-train_accuracies = []
-val_accuracies = []
 
 session_data = {}
 label_session_data = {}
+train_data = []
+train_labels = []
 test_data = []
 test_labels = []
 session_keys = []
 
-# #### TRAINING DATASET 2 - PULSE TRANSIT TIME PPG ####
-# file_names = ['s{}_{}.csv'.format(i, activity) for i in range(1, 22) for activity in ['sit', 'walk', 'run']]
-# file_path = '/Users/jamborghini/Documents/PYTHON/pulse transit time ppg dataset/csv/'
-# csv_files = [file_path + file_name for file_name in file_names]
-#
-# for session_file in csv_files:
-#     session_key = os.path.basename(session_file).replace('.csv', '')  # little trick to not export the whole file path
-#     input_all_channels, label_ecg_data = process_for_cnn(*preprocess_data_pulse_transit(session_file))  # cleaner way instead of typing out the function parameters in full
-#     # * is the UNPACKING operand
-#     session_data[session_key] = input_all_channels
-#     label_session_data[session_key] = label_ecg_data  # Assign label data - KEY MISSED ERROR FROM BEFORE
-#     session_keys.append(session_key)
-
-
-#### TRAINING DATASET 1 - PPG DALIA ####
-
-# process each file and save for model input
-file_names = ['S{}'.format(i) for i in range(1, 16) if i != 6]
+# Process each file and save for model input
+file_names = ['S{}'.format(i) for i in range(1, 16) if i != 6]        # skip Session 6 as data cut short
 pkl_files = [file_name for file_name in file_names]
-## NOTE - for S6 the data is incomplete / corrupted (approx last hour)
 
-
-# Assign session keys as numbers from 1 to 15 (skipping 6)
+# Assign session keys
 for i, session_file in enumerate(pkl_files, start=1):
     session_key = i
     session_keys.append(session_key)
     print(f'Session number:  {session_key}')
-    input_all_channels, label_ecg_data = process_for_cnn(*preprocess_data_dalia(session_file))  # cleaner way instead of typing out the function parameters in full
+    input_all_channels, label_ecg_data = process_for_cnn(*preprocess_data_dalia(session_file))
     session_data[session_key] = input_all_channels    # Assign session data
     label_session_data[session_key] = label_ecg_data  # Assign label data
-    #print(session_data[session_key].shape)
-    #print(label_session_data[session_key].shape)
 
-
-# Create and compile the CNN model
 def train_and_evaluate_model(train_data, train_labels, test_data, test_labels):
+    '''
+    Compile the CNN model and evaluate against test data
+    '''
 
-    # shuffle the order of the SEGMENTS to combat overfitting
+    # shuffle the order of the input segments
     indices = np.random.permutation(len(train_data))
     train_data = train_data[indices]
     train_labels = train_labels[indices]
 
     model = CNN_model()
 
-    accuracy_history = AccuracyHistory()       # for tracking accuracy
-
-    # Train the model on the training data
+    # Train the model with training data
     history = model.fit(
         train_data,
         train_labels,
@@ -359,10 +295,9 @@ def train_and_evaluate_model(train_data, train_labels, test_data, test_labels):
         shuffle=True,
         validation_data=(test_data, test_labels),
         verbose=1,
-        callbacks=[accuracy_history]
     )
 
-    # Calculate Mean Absolute Error (MAE) on the test data
+    # Calculate MAE on the test set
     estimated_bpm = model.predict(test_data)
     mae = mean_absolute_error(test_labels, estimated_bpm)
     return mae, history, model, estimated_bpm
@@ -373,53 +308,71 @@ for session_key in session_keys:
     print(f'Session number: {session_key}/{len(session_keys)}')
     test_data = session_data[session_key]
     test_labels = label_session_data[session_key]
-    print(f'Test data shape: {test_data.shape}')
-    print(f'Test labels shape: {test_labels.shape}')
 
-    # Assign the remaining sessions as the training data (LOSO method)
+    # Assign the remaining sessions as the training data
     train_sessions = [key for key in session_keys if key != session_key]
-
-    train_data = []
-    train_labels = []
-
     for train_session_key in train_sessions:
         train_data.append(session_data[train_session_key])
         train_labels.append(label_session_data[train_session_key])
 
-    # combine all the train data into one long array to iterate through (makes logical sense)
+    # Concatenate all the training data
     train_data = np.concatenate(train_data, axis=0)
     train_labels = np.concatenate(train_labels, axis=0)
 
-    print(f'Train data shape:  {train_data.shape}')
-    print(f'Train labels shape:  {train_labels.shape}')
-
-    # finally - pass training data through the model
+    # Pass training data through the model
     mae, history, model, estimated_bpm = train_and_evaluate_model(train_data, train_labels, test_data, test_labels)
     print(f'MAE for session:  {mae}')
     mae_scores.append(mae)
-    # plot to check the first iteration as a sense-check
-    #plot_results(session_key, test_labels, estimated_bpm, model)
 
-
-model_name = 'HR_model_Aa'  # Set your desired model name
-model.save('/Users/jamborghini/Documents/PYTHON/Trained Models/'+model_name+'.h5')
+model_name = 'HR_model'  # Set desired model name
+model.save()
 
 print("Mean Absolute Errors for Each Session:")
 for i, mae in enumerate(mae_scores):
-    print(f"Session {session_keys[i]}: {mae:.2f}")      # display MAE for each LOSO rotation to 2 decimal points
-
-        #### end of model training section. ####
-
-# Iterate through sessions and train the model
-
+    print(f"Session {session_keys[i]}: {mae:.2f}")     
 
 '''
-    #### PASS DATA T00HROUGH THE MODEL - aka 'running' the model #### (comment out the training section when using) ####
+Start of model compression section
+'''
 
-# plotting results (check MAE is accurate)
+def generate_sample_input():
+    '''
+    Representative dataset for quantisation
+    '''
+    
+    input_data = np.float32(input_all_channels)
+    print(input_data.shape)
+    yield [input_data]
+
+# quantization function
+def post_training_quantize(model, representative_dataset):
+    '''
+    Function for quantizing the trained model
+    '''
+
+    converter = tf.lite.TFLiteConverter.from_keras_model(model)
+    converter.optimizations = [tf.lite.Optimize.DEFAULT]
+    converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS, tf.lite.OpsSet.SELECT_TF_OPS]
+    converter.experimental_lower_tensor_list_ops = False
+
+    converter.representative_dataset = representative_dataset
+
+    # Convert the model to TFLite format
+    result = converter.convert()
+
+    return result
+
+representative_dataset = tf.lite.RepresentativeDataset(generate_sample_input)
+tflite_model = post_training_quantize(model, representative_dataset)
+
+'''
+Start of model inference section (comment out when training)
+'''
+
 def plot_results(session_name, actual_bpm, estimated_bpm):
-    # smooth_window = 10
-    # smoothed_estimated_bpm = np.convolve(estimated_bpm[:, 0], np.ones(smooth_window) / smooth_window, mode='same')
+    '''
+    For visualising results against labelled data
+    '''
 
     plt.plot(estimated_bpm, color='red', label='Estimated')
     plt.plot(actual_bpm, color='black', label='Actual')
@@ -428,105 +381,56 @@ def plot_results(session_name, actual_bpm, estimated_bpm):
     plt.title(f"{session_name} - Estimated vs. Actual BPM")
     plt.show()
 
-# change session file directory & preprocessing function & model name
+# choose dataset to run inference on (comment out as necessary)
 
-## ppg dalia (original data)
-# session_name = 'S5'
+## ppg dalia (training data)
+# session_name = 'S1'
 # input_all_channels, actual_bpm = process_for_cnn(*preprocess_data_dalia(session_name))
 
-# wrist ppg (unseen data)
-session_name = 's1_low_resistance_bike'
+## wrist ppg (unseen data)
+session_name = 's1_high_resistance_bike'
 input_all_channels, actual_bpm = process_for_cnn(*preprocess_data_wrist_ppg(session_name))
 
-model_name = 'HR_model_Aa'
-# uncomment this line for quantizing
-# model = keras.models.load_model('/Users/jamborghini/Documents/PYTHON/Trained Models/'+model_name+'.h5')
-# uncomment this line for inference
-tflite_model_path = '/Users/jamborghini/Documents/PYTHON/Trained Models/'+model_name+'_quantized.tflite'
-
-
-def generate_sample_input():
-    #input_data = np.expand_dims(input_all_channels, axis=-1)   # used for CONV2D
-    input_data = np.float32(input_all_channels)
-    print(input_data.shape)
-    yield [input_data]
-
-representative_dataset = tf.lite.RepresentativeDataset(generate_sample_input)
-
-# quantization function
-def post_training_quantize(model, representative_dataset):
-
-    '''
-    Function for quantizing an already-trained model
-    '''
-
-    converter = tf.lite.TFLiteConverter.from_keras_model(model)
-    converter.optimizations = [tf.lite.Optimize.DEFAULT]
-
-    # Include both built-in TensorFlow Lite ops and selected TensorFlow ops
-    converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS, tf.lite.OpsSet.SELECT_TF_OPS]
-    converter.experimental_lower_tensor_list_ops = False  # Disable experimental lowering of tensor list ops
-
-    converter.representative_dataset = representative_dataset
-
-    # Convert the model to TFLite format
-    tflite_quant_model = converter.convert()
-
-    # save it down
-    tflite_model_path = '/Users/jamborghini/Documents/PYTHON/Trained Models/' + model_name + '_quantized.tflite'
-    with open(tflite_model_path, 'wb') as f:
-        f.write(tflite_quant_model)
-
-    return tflite_model_path
-
-# only uncomment when quantizing model:
-# tflite_model_path = post_training_quantize(model, representative_dataset)
-
 def quantizer_inference(tflite_quant_model_path, input_all_channels):
-
     '''
-    Function for running inference a quantized / compressed model
+    Run inference on compressed model
     '''
 
-    start_time = time.time()   # set timer to measure inference speed
+    # timer to measure speed of inference
+    start_time = time.time()
 
-    # create the interpreter for inference (running the model on existing data)
-    #interpreter = tf.lite.Interpreter(model_content=tflite_quant_model)    # used when quantizing model for first time
-    interpreter = tf.lite.Interpreter(model_path=tflite_quant_model_path)
+    # create the interpreter for inference
+    interpreter = tf.lite.Interpreter(model_content=tflite_model)  
     interpreter.allocate_tensors()
 
-    # Get input and output details for tf.lite model
+    # get input and output details for tf.lite model
     input_details = interpreter.get_input_details()
     output_details = interpreter.get_output_details()
-    # print(input_details)        # can see it takes in 3D
-    # print(output_details)       # can see it spits out 2D
 
     # adjust input data to be compatible with new model format (for Conv1D)
     input_all_channels = input_all_channels.astype(np.float32)
-    num_inference_segments, height, width = input_all_channels.shape        # 3 dimensions here, not 4 as for Conv2D
+    num_inference_segments, height, width = input_all_channels.shape     
     estimated_bpm = []
 
     # run inference on each segment independently
     for i in range(num_inference_segments):
-        input_data = input_all_channels[i:i+1]  # Select one segment
+        input_data = input_all_channels[i:i+1]
         interpreter.set_tensor(input_details[0]['index'], input_data)
         interpreter.invoke()
         output_data = interpreter.get_tensor(output_details[0]['index'])
-        estimated_bpm.append(output_data[0][0])  # Assuming output is a scalar
+        estimated_bpm.append(output_data[0][0])
 
     # finalise output into proper format
     estimated_bpm = np.array(estimated_bpm)
-    estimated_bpm = estimated_bpm.reshape(-1, 1)
+    estimated_bpm = estimated_bpm.reshape(-1, 1)        # convert to 2D array
 
     elapsed_time = time.time() - start_time
     print(f"Inference time: {elapsed_time} seconds")
     return estimated_bpm
 
-# only uncomment when running inference:
+# Run inference function
 estimated_bpm = quantizer_inference(tflite_model_path, input_all_channels)
 
-# equate length of test + label data
-estimated_bpm = estimated_bpm[:len(actual_bpm)]
 mae = mean_absolute_error(estimated_bpm, actual_bpm)
 print(f'MAE:  {mae}')
 
