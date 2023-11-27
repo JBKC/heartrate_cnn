@@ -1,9 +1,8 @@
 
 '''
-Super streamlined model that fits in c.32KB
-Two steps: (1) train model (2) compress model down
+Streamlined model that takes up < 40KB
+Two steps: (1) train model; (2) compress model
 '''
-
 
 import pickle
 import pprint
@@ -29,39 +28,39 @@ import os
 import tensorflow_model_optimization as tfmot
 import time
 
-
-## TRAINING DATASET 1 - preprocessing PPG-Dalia
 def preprocess_data_dalia(session_name):
+    '''
+    Extract session data from PPG Dalia .pkl files for training
+    '''
 
-    session_file = '/Users/jamborghini/Documents/PYTHON/TRAINING DATA - PPG Dalia/' + session_name + '.pkl'
+    session_file = session_name + '.pkl'   # adjust pathname as necessary
 
     with open(session_file, 'rb') as file:
         data = pickle.load(file, encoding='latin1')
-    # pprint.pprint(data)
 
-    # from scientific paper where PPG_Dalia comes from
+    # sampling rates given by research paper
     fs_ppg = 64  # Hz
     fs_acc = 32  # Hz
-    fs_ecg = 0.5 # effective sampling rate given measured every 2 seconds
+    fs_ecg = 0.5 # Hz (effective sampling rate)
 
-    time_analyse_seconds = 7900
-    num_ppg = int(time_analyse_seconds * fs_ppg)          # number of datapoints
+    time_analyse_seconds = 7900                        # total time period of session
+    # calculate no. of datapoints
+    num_ppg = int(time_analyse_seconds * fs_ppg)      
     num_acc = int(time_analyse_seconds * fs_acc)
     num_ecg = int(time_analyse_seconds * fs_ecg)
 
-    # extract data
+    # extract PPG sensor data
     ppg_data = data['signal']['wrist']['BVP']
     ppg_data = ppg_data[:num_ppg]
     ppg_data = np.squeeze(ppg_data)
-    #ppg_data = np.array(ppg_data)
-    #print(ppg_data.shape)
 
-    # make sure it's in the same form
+    # reshape data to remove unwanted dimensions
     def unpack(signal):
         data = signal.reshape(-1, 1)
         data = np.squeeze(data)
         return data
 
+    # extract accelerometer sensor data
     acc_data = data['signal']['wrist']['ACC']
     x_data = acc_data[:, 0][:num_acc]
     x_data = unpack(x_data)
@@ -70,14 +69,18 @@ def preprocess_data_dalia(session_name):
     z_data = acc_data[:, 2][:num_acc]
     z_data = unpack(z_data)
 
+    # assign ground truth labels
     ecg_ground_truth = data['label']
-    ecg_ground_truth = ecg_ground_truth[:num_ecg-3]   # -3 because of windowing. Make this dynamic eventually
+    ecg_ground_truth = ecg_ground_truth[:num_ecg-3]
 
     return ppg_data, x_data, y_data, z_data, ecg_ground_truth, fs_ppg, fs_acc, num_ppg, num_acc
 
 def preprocess_data_wrist_ppg(session_name):
-    file_path = '/Users/jamborghini/Documents/PYTHON/TESTING DATA - Wrist PPG Dataset/'
-    file_name = file_path + session_name
+    '''
+    Extract session data from Wrist PPG .pkl files for testing
+    '''
+    
+    file_name = session_name                # adjust file path as necessary
     record = wfdb.rdrecord(file_name)
 
     # from .hea file: 0 = ecg, 1 = ppg, 2-4 = gyro, 5-7 = 2g accelerometer, 8-10 = 16g accelerometer
@@ -92,56 +95,64 @@ def preprocess_data_wrist_ppg(session_name):
     y_data = df['y']
     z_data = df['z']
 
-    with open('/Users/jamborghini/Documents/PYTHON/Fatigue Model/' + session_name +'_heart_rate_wrist_ppg.pkl', 'rb') as file:
+    with open(session_name +'.pkl', 'rb') as file:                    # adjust file path as necessary
         ecg_ground_truth = pickle.load(file, encoding='latin1')
 
-    fs_ppg = 256  # from the paper
+    # sampling rates given by research paper
+    fs_ppg = 256 
     fs_acc = 256
     num_ppg = len(ppg_data)
     num_acc = len(x_data)
-    time_analyse_seconds = len(ppg_data) / fs_ppg  # this is the total time in seconds
+    time_analyse_seconds = len(ppg_data) / fs_ppg
 
     return ppg_data, x_data, y_data, z_data, ecg_ground_truth, fs_ppg, fs_acc, num_ppg, num_acc
 
 def process_for_cnn(ppg_data, x_data, y_data, z_data, ecg_ground_truth, fs_ppg, fs_acc, num_ppg, num_acc):
+    '''
+    Generic processing function to get data ready for model input
+    '''
 
     def calculate_fft(data):
-        result = np.fft.fft(data)  # take full FFT not just the positive part
+        '''
+        Return the FFT (frequency components) of input signal
+        '''
+        
+        result = np.fft.fft(data)  
         return result
 
-    def trim_fft(data, num_segments):
-        # only keep 0-4Hz
-        trim_index = 256 * num_segments +1         # make dynamic when you set classes
+    def trim_fft(data):
+        '''
+        Trim frequency data to the range of interest to spot heartbeats (0-4Hz)
+        '''
+        
+        trim_index = 256 +1         
         result = data[:trim_index]
         return result
 
-
-    # get the original signal into segments + take FFT
     def segment_fft(data, fs, num_data):
+        '''
+        Cut time-domain signal into segments and run processing
+        '''
+        
+        segments = []
         segment_size_seconds = 8
         segment_step_seconds = 2
-        segment_size = segment_size_seconds * fs       # better to keep in terms of indices not time
+        segment_size = segment_size_seconds * fs       
         segment_step = segment_step_seconds * fs
-        num_windows = ((num_data - segment_size) // segment_step) +1                  # easy to visualise this formula
+        num_windows = ((num_data - segment_size) // segment_step) +1             
 
-        num_segments = 1
-        segments = []
-
-
+        # Create segments
         for i in range(num_windows):
             start_idx = i * segment_step
-            end_idx = start_idx + (segment_size * num_segments)
+            end_idx = start_idx + segment_size
             segment = data[start_idx:end_idx]
-            segments.append(segment)    # append each segment (row) into the matrix of all segments
-
-        # get rows of segments into array format
+            segments.append(segment)  
         segments = np.array(segments)
 
-        # zero padding to original signal increaed frequency resolution before FFT, based on wanting 0-4Hz
-        desired_freq = 4
-        zeros_to_add = int((256*fs*num_segments)/desired_freq - (fs*segment_size_seconds*num_segments))  # see laptop notes + cancel out terms for derivation
-        #print(f'Zeros to add:  {zeros_to_add}')
+        # Zero-pad signal to increase frequency resolution
         segments_padded = []
+        desired_freq = 4
+        zeros_to_add = int((256*fs)/desired_freq - (fs*segment_size_seconds))
 
         for i in range(segments.shape[0]):
             segment = segments[i]
@@ -150,61 +161,49 @@ def process_for_cnn(ppg_data, x_data, y_data, z_data, ecg_ground_truth, fs_ppg, 
             segments_padded.append(padded_row)
 
         segments_padded = np.array(segments_padded)
+
         segments_fft = []
         segments_normalised = []
 
         # calculate FFT independently on each segment
-        for i in range(segments_padded.shape[0]):
+        forCi in range(segments_padded.shape[0]):
             segment_padded = segments_padded[i]
             segment_fft = calculate_fft(segment_padded)
             segments_fft.append(segment_fft)
 
         segments_fft = np.array(segments_fft)
-        #print(f'FFT shape:  {segments_fft.shape}')
 
-        # final processing
+        # Trim & z-normalise signal
         for i in range(segments_fft.shape[0]):
             segment_fft = segments_fft[i]
-            # cut down to 0-4Hz
-            segment_fft = trim_fft(segment_fft, num_segments)
-            # z-normalization individually on each new trimmed segment (makes sense)
+            segment_fft = trim_fft(segment_fft)
             mean = np.mean(segment_fft, axis=0)
             std_dev = np.std(segment_fft, axis=0)
             segment_normalised = (segment_fft - mean) / std_dev
             segments_normalised.append(segment_normalised)
 
-
         result = np.array(segments_normalised)
-        #print(f'Normalised shape:  {result.shape}')
 
         return result
 
+    # Retrieve inputs for model
     ppg_input = segment_fft(ppg_data, fs_ppg, num_ppg)
     x_input = segment_fft(x_data, fs_acc, num_acc)
     y_input = segment_fft(y_data, fs_acc, num_acc)
     z_input = segment_fft(z_data, fs_acc, num_acc)
 
-    # with open('ppg_input.csv', 'w', newline='') as csvfile:
-    #     csv.writer(csvfile).writerows(ppg_input)
-
+    # Stack results into tensor
     input_all_channels = np.stack([ppg_input, x_input, y_input, z_input], axis=0)
-    # convert any NaN from the FFT to zero
-    input_all_channels = np.nan_to_num(input_all_channels, nan=0)
 
-    # reshape data (Conv1D)
+    # Error handling
+    input_all_channels = np.nan_to_num(input_all_channels, nan=0)
+    assert not np.any(np.isnan(input_all_channels)), "NaN."
+
+    # Reshape data for Conv1D
     input_all_channels = np.transpose(input_all_channels, (1, 2, 0))
 
-
-    # convert any NaN from the FFT to zero
-    input_all_channels = np.nan_to_num(input_all_channels, nan=0)
-    print(f'All channels shape:  {input_all_channels.shape}')
-
-    # label the data 1-to-1
+    # Label each segment in the input data
     label_ecg_data = ecg_ground_truth
-    #print(label_ecg_data.shape)
-
-    # NaN / blank tester (error handling)
-    assert not np.any(np.isnan(input_all_channels)), "NaN."
 
     return input_all_channels, label_ecg_data
 
