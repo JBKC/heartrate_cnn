@@ -397,7 +397,7 @@ def quantizer_inference(tflite_quant_model_path, input_all_channels):
     '''
 
     # timer to measure speed of inference
-    start_time = time.time()
+    start_time = time.perf_counter()
 
     # create the interpreter for inference
     interpreter = tf.lite.Interpreter(model_content=tflite_model)  
@@ -424,8 +424,8 @@ def quantizer_inference(tflite_quant_model_path, input_all_channels):
     estimated_bpm = np.array(estimated_bpm)
     estimated_bpm = estimated_bpm.reshape(-1, 1)        # convert to 2D array
 
-    elapsed_time = time.time() - start_time
-    print(f"Inference time: {elapsed_time} seconds")
+    end_time = time.perf_counter()
+    print(f"Inference time: {end_time - start_time} seconds")
     return estimated_bpm
 
 # Run inference function
